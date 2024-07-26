@@ -550,3 +550,163 @@ func IsNilReply(line []byte) bool {
 		(line[0] == RespString || line[0] == RespArray) &&
 		line[1] == '-' && line[2] == '1'
 }
+
+func (r *Reader) ReadLineWithRaw() ([]byte, error) {
+	line, err := r.readLine()
+	if err != nil {
+		return line, err
+	}
+	switch line[0] {
+	case RespError:
+		return line, ParseErrorReply(line)
+	case RespNil:
+		return line, Nil
+	case RespBlobError:
+		var blobErr string
+		blobErr, err = r.readStringReply(line)
+		if err == nil {
+			err = RedisError(blobErr)
+		}
+		return line, err
+	case RespAttr:
+		if err = r.Discard(line); err != nil {
+			return line, err
+		}
+		return r.ReadLine()
+	}
+
+	// Compatible with RESP2
+	if IsNilReply(line) {
+		return line, Nil
+	}
+
+	return line, nil
+}
+
+func (r *Reader) ReadReplyWithRaw() (interface{}, []byte, error) {
+	line, err := r.ReadLineWithRaw()
+	var rawData []byte
+	rawData = append(rawData, line...)
+	rawData = append(rawData, '\r', '\n')
+	if err != nil {
+		return nil, rawData, err
+	}
+
+	switch line[0] {
+	case RespStatus:
+		return string(line[1:]), rawData, nil
+	case RespInt:
+		val, err := util.ParseInt(line[1:], 10, 64)
+		return val, rawData, err
+	case RespFloat:
+		val, err := r.readFloat(line)
+		return val, rawData, err
+	case RespBool:
+		val, err := r.readBool(line)
+		return val, rawData, err
+	case RespBigInt:
+		val, err := r.readBigInt(line)
+		return val, rawData, err
+	case RespString:
+		val, rawValue, err := r.readStringReplyWithRaw(line)
+		rawData = append(rawData, rawValue...)
+		return val, rawData, err
+	case RespVerbatim:
+		val, rawValue, err := r.readVerbWithRaw(line)
+		rawData = append(rawData, rawValue...)
+		return val, rawData, err
+	case RespArray, RespSet, RespPush:
+		val, rawValue, err := r.readSliceWithRaw(line)
+		rawData = append(rawData, rawValue...)
+		return val, rawData, err
+	case RespMap:
+		val, rawValue, err := r.readMapWithRaw(line)
+		rawData = append(rawData, rawValue...)
+		return val, rawData, err
+	}
+	return nil, nil, fmt.Errorf("redis: can't parse %.100q", line)
+}
+
+func (r *Reader) readStringReplyWithRaw(line []byte) (string, []byte, error) {
+	n, err := replyLen(line)
+	if err != nil {
+		return "", nil, err
+	}
+
+	b := make([]byte, n+2)
+	_, err = io.ReadFull(r.rd, b)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return util.BytesToString(b[:n]), b, nil
+}
+
+func (r *Reader) readSliceWithRaw(line []byte) ([]interface{}, []byte, error) {
+	n, err := replyLen(line)
+	var rawData []byte
+	if err != nil {
+		return nil, nil, err
+	}
+
+	val := make([]interface{}, n)
+	for i := 0; i < len(val); i++ {
+		v, ov, err := r.ReadReplyWithRaw()
+		rawData = append(rawData, ov...)
+		if err != nil {
+			if err == Nil {
+				val[i] = nil
+				continue
+			}
+			if err, ok := err.(RedisError); ok {
+				val[i] = err
+				continue
+			}
+			return nil, rawData, err
+		}
+		val[i] = v
+	}
+	return val, rawData, nil
+}
+
+func (r *Reader) readMapWithRaw(line []byte) (map[interface{}]interface{}, []byte, error) {
+	n, err := replyLen(line)
+	var rawData []byte
+	if err != nil {
+		return nil, nil, err
+	}
+	m := make(map[interface{}]interface{}, n)
+	for i := 0; i < n; i++ {
+		k, rawK, err := r.ReadReplyWithRaw()
+		rawData = append(rawData, rawK...)
+		if err != nil {
+			return nil, nil, err
+		}
+		v, rawV, err := r.ReadReplyWithRaw()
+		rawData = append(rawData, rawV...)
+		if err != nil {
+			if err == Nil {
+				m[k] = nil
+				continue
+			}
+			if err, ok := err.(RedisError); ok {
+				m[k] = err
+				continue
+			}
+			return nil, nil, err
+		}
+		m[k] = v
+	}
+	return m, rawData, nil
+}
+
+func (r *Reader) readVerbWithRaw(line []byte) (string, []byte, error) {
+	s, b, err := r.readVerbWithRaw(line)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(s) < 4 || s[3] != ':' {
+		return "", nil, fmt.Errorf("redis: can't parse verbatim string reply: %q", line)
+	}
+	return s[4:], b, nil
+}
