@@ -202,7 +202,8 @@ func (cmd *baseCmd) setReadTimeout(d time.Duration) {
 type Cmd struct {
 	baseCmd
 
-	val interface{}
+	val    interface{}
+	rawVal []byte
 }
 
 func NewCmd(ctx context.Context, args ...interface{}) *Cmd {
@@ -225,6 +226,8 @@ func (cmd *Cmd) SetVal(val interface{}) {
 func (cmd *Cmd) Val() interface{} {
 	return cmd.val
 }
+
+func (cmd *Cmd) RawVal() []byte { return cmd.rawVal }
 
 func (cmd *Cmd) Result() (interface{}, error) {
 	return cmd.val, cmd.err
@@ -478,7 +481,7 @@ func (cmd *Cmd) BoolSlice() ([]bool, error) {
 }
 
 func (cmd *Cmd) readReply(rd *proto.Reader) (err error) {
-	cmd.val, err = rd.ReadReply()
+	cmd.val, cmd.rawVal, err = rd.ReadReplyWithRaw()
 	return err
 }
 
@@ -5550,3 +5553,39 @@ func (cmd *MonitorCmd) Stop() {
 	defer cmd.mu.Unlock()
 	cmd.status = monitorStatusStop
 }
+
+func CmdReader(conn net.Conn) func() ([]interface{}, error) {
+	rd := proto.NewReader(conn)
+	return func() ([]interface{}, error) {
+		buffer, err := rd.ReadReply()
+		if err != nil {
+			return nil, err
+		}
+		stringList := strings.Split(strings.TrimLeft(strings.TrimRight(fmt.Sprintf("%s", buffer), "]"), "["), " ")
+		args := make([]interface{}, len(stringList))
+		for i, v := range stringList {
+			args[i] = v
+		}
+		return args, nil
+	}
+}
+
+//
+//func ReplyWriter(conn net.Conn) {
+//	writer := bufio.NewWriter(conn)
+//	writer.Wri
+//
+//	w := proto.NewWriter(bufio.NewWriter(conn))
+//	w.Write()
+//	n, err := w.wr.Write(res)
+//	if err != nil {
+//		fmt.Println(err)
+//	}
+//	err = w.crlf()
+//	if err != nil {
+//		fmt.Println(err)
+//	}
+//	err = w.wr.Flush()
+//	fmt.Printf("wrote, %d,  %s \n", n, res)
+//	return err
+//}
