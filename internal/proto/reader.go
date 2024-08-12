@@ -551,7 +551,7 @@ func IsNilReply(line []byte) bool {
 		line[1] == '-' && line[2] == '1'
 }
 
-func (r *Reader) ReadLineWithRaw() ([]byte, error) {
+func (r *Reader) ReadLineWithRaw(transformer func(input []byte) []byte) ([]byte, error) {
 	line, err := r.readLine()
 	if err != nil {
 		return line, err
@@ -583,8 +583,8 @@ func (r *Reader) ReadLineWithRaw() ([]byte, error) {
 	return line, nil
 }
 
-func (r *Reader) ReadReplyWithRaw() (interface{}, []byte, error) {
-	line, err := r.ReadLineWithRaw()
+func (r *Reader) ReadReplyWithRaw(transformer func(input []byte) []byte) (interface{}, []byte, error) {
+	line, err := r.ReadLineWithRaw(transformer)
 	var rawData []byte
 	rawData = append(rawData, line...)
 	rawData = append(rawData, '\r', '\n')
@@ -608,26 +608,25 @@ func (r *Reader) ReadReplyWithRaw() (interface{}, []byte, error) {
 		val, err := r.readBigInt(line)
 		return val, rawData, err
 	case RespString:
-		val, rawValue, err := r.readStringReplyWithRaw(line)
-		rawData = append(rawData, rawValue...)
-		return val, rawData, err
+		val, rawValue, err := r.readStringReplyWithRaw(line, transformer)
+		return val, generateStringRespRaw(rawValue), err
 	case RespVerbatim:
 		val, rawValue, err := r.readVerbWithRaw(line)
 		rawData = append(rawData, rawValue...)
 		return val, rawData, err
 	case RespArray, RespSet, RespPush:
-		val, rawValue, err := r.readSliceWithRaw(line)
+		val, rawValue, err := r.readSliceWithRaw(line, transformer)
 		rawData = append(rawData, rawValue...)
 		return val, rawData, err
 	case RespMap:
-		val, rawValue, err := r.readMapWithRaw(line)
+		val, rawValue, err := r.readMapWithRaw(line, transformer)
 		rawData = append(rawData, rawValue...)
 		return val, rawData, err
 	}
 	return nil, nil, fmt.Errorf("redis: can't parse %.100q", line)
 }
 
-func (r *Reader) readStringReplyWithRaw(line []byte) (string, []byte, error) {
+func (r *Reader) readStringReplyWithRaw(line []byte, transformer func(input []byte) []byte) (string, []byte, error) {
 	n, err := replyLen(line)
 	if err != nil {
 		return "", nil, err
@@ -639,10 +638,12 @@ func (r *Reader) readStringReplyWithRaw(line []byte) (string, []byte, error) {
 		return "", nil, err
 	}
 
-	return util.BytesToString(b[:n]), b, nil
+	transformed := transformer(b[:n])
+
+	return util.BytesToString(transformed), append(transformed, '\r', '\n'), nil
 }
 
-func (r *Reader) readSliceWithRaw(line []byte) ([]interface{}, []byte, error) {
+func (r *Reader) readSliceWithRaw(line []byte, transformer func(input []byte) []byte) ([]interface{}, []byte, error) {
 	n, err := replyLen(line)
 	var rawData []byte
 	if err != nil {
@@ -651,7 +652,7 @@ func (r *Reader) readSliceWithRaw(line []byte) ([]interface{}, []byte, error) {
 
 	val := make([]interface{}, n)
 	for i := 0; i < len(val); i++ {
-		v, ov, err := r.ReadReplyWithRaw()
+		v, ov, err := r.ReadReplyWithRaw(transformer)
 		rawData = append(rawData, ov...)
 		if err != nil {
 			if err == Nil {
@@ -669,7 +670,7 @@ func (r *Reader) readSliceWithRaw(line []byte) ([]interface{}, []byte, error) {
 	return val, rawData, nil
 }
 
-func (r *Reader) readMapWithRaw(line []byte) (map[interface{}]interface{}, []byte, error) {
+func (r *Reader) readMapWithRaw(line []byte, transformer func(input []byte) []byte) (map[interface{}]interface{}, []byte, error) {
 	n, err := replyLen(line)
 	var rawData []byte
 	if err != nil {
@@ -677,12 +678,12 @@ func (r *Reader) readMapWithRaw(line []byte) (map[interface{}]interface{}, []byt
 	}
 	m := make(map[interface{}]interface{}, n)
 	for i := 0; i < n; i++ {
-		k, rawK, err := r.ReadReplyWithRaw()
+		k, rawK, err := r.ReadReplyWithRaw(transformer)
 		rawData = append(rawData, rawK...)
 		if err != nil {
 			return nil, nil, err
 		}
-		v, rawV, err := r.ReadReplyWithRaw()
+		v, rawV, err := r.ReadReplyWithRaw(transformer)
 		rawData = append(rawData, rawV...)
 		if err != nil {
 			if err == Nil {
@@ -709,4 +710,13 @@ func (r *Reader) readVerbWithRaw(line []byte) (string, []byte, error) {
 		return "", nil, fmt.Errorf("redis: can't parse verbatim string reply: %q", line)
 	}
 	return s[4:], b, nil
+}
+
+func generateStringRespRaw(s []byte) []byte {
+	var resp []byte
+	resp = append(resp, RespString)
+	resp = append(resp, []byte(strconv.Itoa(len(s)-2))...)
+	resp = append(resp, '\r', '\n')
+	resp = append(resp, s...)
+	return resp
 }
