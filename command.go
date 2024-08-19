@@ -202,8 +202,9 @@ func (cmd *baseCmd) setReadTimeout(d time.Duration) {
 type Cmd struct {
 	baseCmd
 
-	val    interface{}
-	rawVal []byte
+	val       interface{}
+	rawVal    []byte
+	decryptor func([]byte) []byte
 }
 
 func NewCmd(ctx context.Context, args ...interface{}) *Cmd {
@@ -211,6 +212,9 @@ func NewCmd(ctx context.Context, args ...interface{}) *Cmd {
 		baseCmd: baseCmd{
 			ctx:  ctx,
 			args: args,
+		},
+		decryptor: func(input []byte) []byte {
+			return input
 		},
 	}
 }
@@ -481,8 +485,12 @@ func (cmd *Cmd) BoolSlice() ([]bool, error) {
 }
 
 func (cmd *Cmd) readReply(rd *proto.Reader) (err error) {
-	cmd.val, cmd.rawVal, err = rd.ReadReplyWithRaw()
+	cmd.val, cmd.rawVal, err = rd.ReadReplyWithRaw(cmd.decryptor)
 	return err
+}
+
+func (cmd *Cmd) SetDecryptor(decryptor func([]byte) []byte) {
+	cmd.decryptor = decryptor
 }
 
 //------------------------------------------------------------------------------
@@ -5569,23 +5577,3 @@ func CmdReader(conn net.Conn) func() ([]interface{}, error) {
 		return args, nil
 	}
 }
-
-//
-//func ReplyWriter(conn net.Conn) {
-//	writer := bufio.NewWriter(conn)
-//	writer.Wri
-//
-//	w := proto.NewWriter(bufio.NewWriter(conn))
-//	w.Write()
-//	n, err := w.wr.Write(res)
-//	if err != nil {
-//		fmt.Println(err)
-//	}
-//	err = w.crlf()
-//	if err != nil {
-//		fmt.Println(err)
-//	}
-//	err = w.wr.Flush()
-//	fmt.Printf("wrote, %d,  %s \n", n, res)
-//	return err
-//}
